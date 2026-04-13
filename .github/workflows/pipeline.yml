@@ -8,6 +8,11 @@ on:
     # 18:00 IST = 12:30 UTC
     - cron: '30 3,9,12 * * *'
   workflow_dispatch: # Allows manual trigger from GitHub UI
+    inputs:
+      backfill_start_date:
+        description: 'Start date for backfill (YYYY-MM-DD)'
+        required: false
+        default: ''
 
 jobs:
   run-pipeline:
@@ -41,4 +46,5 @@ jobs:
           GOOGLE_CREDENTIALS_FILE: "Credentials.json"
           API_VERSION: "v19.0"
           DEFAULT_START_DATE: "2026-02-28"
+          BACKFILL_START_DATE: ${{ github.event.inputs.backfill_start_date }}
         run: python run_all.py

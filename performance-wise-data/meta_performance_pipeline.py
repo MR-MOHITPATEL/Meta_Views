@@ -35,9 +35,15 @@ def fetch_performance_insights(config: dict, start_date: str = None, end_date: s
     Fetch daily insights for all ads in the given ad account.
     """
     if not start_date:
-        # 7-day rolling lookback to ensure late-arriving data is captured
-        lookback_date = datetime.date.today() - datetime.timedelta(days=7)
-        start = lookback_date.strftime("%Y-%m-%d")
+        # Check for a backfill override from a higher-level script or environment
+        backfill_date = os.getenv("BACKFILL_START_DATE")
+        if backfill_date:
+            start = backfill_date
+            logger.info(f"Using BACKFILL_START_DATE override: {start}")
+        else:
+            # Default: 7-day rolling lookback to ensure late-arriving data is captured
+            lookback_date = datetime.date.today() - datetime.timedelta(days=7)
+            start = lookback_date.strftime("%Y-%m-%d")
     else:
         start = start_date
         
