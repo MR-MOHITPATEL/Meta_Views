@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Sensitive Config
+.env
+Credentials.json
+GOOGLE_CREDENTIALS_JSON.json
+credentials.json
+
+# Data Reports
+*.xlsx
+performance-wise-data/*.xlsx
+Pincode-wise-Data/*.xlsx
+
+# Logs
+*.log
+debug.log
+
+# Other
+.idea/
+.vscode/
+.gemini/
