@@ -1,16 +1,17 @@
-name: Meta Ads Automation Pipeline
+name: Meta Ads Pipeline
 
 on:
   schedule:
-    # Runs at 9:00, 15:00, and 18:00 IST (UTC +5:30)
-    # 09:00 IST = 03:30 UTC
-    # 15:00 IST = 09:30 UTC
+    # 9:00 IST  = 03:30 UTC
+    # 14:00 IST = 08:30 UTC
     # 18:00 IST = 12:30 UTC
-    - cron: '30 3,9,12 * * *'
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+    - cron: '30 3 * * *'
+    - cron: '30 8 * * *'
+    - cron: '30 12 * * *'
+  workflow_dispatch:
     inputs:
       backfill_start_date:
-        description: 'Start date for backfill (YYYY-MM-DD)'
+        description: 'Backfill start date (YYYY-MM-DD). Leave empty for normal incremental run.'
         required: false
         default: ''
 
@@ -19,32 +20,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install google-auth google-auth-oauthlib
 
-      - name: Create Credentials File
-        run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > Credentials.json
+      - name: Write Google credentials file
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > Credentials.json
 
-      - name: Run Meta Pipeline
+      - name: Run Meta Ads pipeline
+        working-directory: meta_ads_raw_dump
         env:
-          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          AD_ACCOUNT_ID: ${{ secrets.AD_ACCOUNT_ID }}
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
-          GOOGLE_WORKSHEET_NAME: ${{ secrets.GOOGLE_WORKSHEET_NAME }}
-          GOOGLE_CREDENTIALS_FILE: "Credentials.json"
-          API_VERSION: "v19.0"
-          DEFAULT_START_DATE: "2026-02-28"
-          BACKFILL_START_DATE: ${{ github.event.inputs.backfill_start_date }}
+          META_ACCESS_TOKEN:       ${{ secrets.META_ACCESS_TOKEN }}
+          AD_ACCOUNT_ID:           ${{ secrets.AD_ACCOUNT_ID }}
+          GOOGLE_SHEET_ID:         ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_WORKSHEET_NAME:   ${{ secrets.GOOGLE_WORKSHEET_NAME }}
+          GOOGLE_CREDENTIALS_FILE: Credentials.json
+          API_VERSION:             v19.0
+          DEFAULT_START_DATE:      "2026-02-28"
+          BACKFILL_START_DATE:     ${{ github.event.inputs.backfill_start_date }}
         run: python run_all.py
