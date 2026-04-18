@@ -12,6 +12,9 @@ ENV/
 Credentials.json
 GOOGLE_CREDENTIALS_JSON.json
 credentials.json
+analytics_engine/credentials/
+meta_ads_raw_dump/analytics/credentials/
+**/credentials/*.json
 
 # Data Reports
 *.xlsx
@@ -26,3 +29,7 @@ debug.log
 .idea/
 .vscode/
 .gemini/
+april_creative_report.py
+scratch/
+meta_ads_raw_dump/scratch/
+analytics_engine/saved_views.json
