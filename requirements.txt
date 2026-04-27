@@ -5,7 +5,7 @@ openpyxl
 Pillow
 python-dotenv
 gspread
-oauth2client
+google-auth
 streamlit
 plotly
 google-generativeai

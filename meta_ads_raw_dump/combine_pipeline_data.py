@@ -77,14 +77,12 @@ def combine_data():
     combined_df['date'] = combined_df['date'].dt.strftime('%Y-%m-%d')
     combined_df = combined_df.drop_duplicates()
 
-    # Column ordering
-    primary_cols = [
-        'date', 'campaign_id', 'campaign_name', 'adset_id', 'adset_name', 'ad_name', 
-        'image_url', 'pincodes'
-    ]
-    metric_cols = [c for c in combined_df.columns if c not in primary_cols]
-    final_cols = primary_cols + metric_cols
-    combined_df = combined_df[final_cols]
+    # Enforce canonical column order (same as RAW_DUMP_COLS) so pivot tables
+    # in Google Sheets never get field references remapped to the wrong column.
+    for col in RAW_DUMP_COLS:
+        if col not in combined_df.columns:
+            combined_df[col] = ""
+    combined_df = combined_df[RAW_DUMP_COLS]
 
     logger.info(f"Exporting final master report to {output_path}...")
     try:
@@ -119,24 +117,98 @@ _SCOPES = [
 ]
 _CHUNK_ROWS = 2000  # safe batch size for Sheets API
 
+# Canonical column order — Raw Dump must ALWAYS have columns in this exact order
+# so that Google Sheets native pivot tables never remap fields to the wrong column.
+RAW_DUMP_COLS = [
+    "date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_name",
+    "image_url", "pincodes",
+    "spend", "impressions", "cpm", "cpc", "ctr", "link_clicks", "landing_page_views",
+    "c2v_ratio", "cost_per_result", "roas", "cvr", "add_to_cart", "leads", "purchases", "revenue",
+]
+
+# Uniqueness key for deduplication: one row per ad per day
+_DEDUP_KEYS = ["date", "campaign_id", "adset_id", "ad_name"]
+
+
+def _read_existing_raw_dump(worksheet) -> pd.DataFrame:
+    """
+    Read whatever is currently in the Raw Dump worksheet.
+    Returns an empty DataFrame if the sheet is blank.
+    """
+    try:
+        records = worksheet.get_all_records(value_render_option="FORMATTED_VALUE")
+        if not records:
+            return pd.DataFrame()
+        df = pd.DataFrame(records)
+        df.columns = [c.strip() for c in df.columns]
+        return df
+    except Exception as e:
+        logger.warning(f"Could not read existing Raw Dump: {e}. Starting fresh.")
+        return pd.DataFrame()
+
+
+def _merge_with_history(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge new_df into existing_df:
+    - New rows are appended.
+    - Rows that share the same date+campaign_id+adset_id+ad_name are updated
+      with the fresh values (new fetch wins — keeps latest Meta attribution).
+    - Column order is always RAW_DUMP_COLS.
+    """
+    if existing_df.empty:
+        merged = new_df.copy()
+    else:
+        # Normalise key columns in existing data so dedup works correctly
+        for col in _DEDUP_KEYS:
+            if col in existing_df.columns:
+                existing_df[col] = existing_df[col].astype(str).str.strip()
+
+        # Concat: existing first, new last → keep='last' retains the fresh values
+        merged = pd.concat([existing_df, new_df], ignore_index=True)
+
+    existing_keys = [k for k in _DEDUP_KEYS if k in merged.columns]
+    before = len(merged)
+    merged = merged.drop_duplicates(subset=existing_keys, keep="last")
+    logger.info(f"History merge: {before} rows → {len(merged)} after dedup "
+                f"({before - len(merged)} updated/removed).")
+
+    # Sort: latest date first
+    if "date" in merged.columns:
+        merged["date"] = pd.to_datetime(merged["date"], errors="coerce")
+        merged = merged.sort_values("date", ascending=False)
+        merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
+
+    # Enforce canonical column order — add missing cols as empty, drop unknown extras
+    for col in RAW_DUMP_COLS:
+        if col not in merged.columns:
+            merged[col] = ""
+    merged = merged[RAW_DUMP_COLS]
+
+    return merged
+
 
 def upload_to_google_sheets(df: pd.DataFrame):
     """
-    Uploads the final combined DataFrame to Google Sheets.
-    Uses google.oauth2 (same library as analytics_engine).
-    Clears the existing data before uploading in chunks.
+    Merge-uploads the combined DataFrame to Google Sheets Raw Dump.
+
+    Instead of wiping the sheet and writing only the last 7 days, we:
+      1. Read the existing sheet contents (full history).
+      2. Merge the new data in (new rows added, existing rows for the same
+         date+ad updated with fresh values).
+      3. Write the merged result back — history is never lost.
     """
+    import numpy as np
+
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     worksheet_name = os.getenv("GOOGLE_WORKSHEET_NAME", "Raw Dump")
     creds_file_name = os.getenv("GOOGLE_CREDENTIALS_FILE", "Credentials.json")
     creds_file = os.path.join(os.path.dirname(__file__), "..", creds_file_name)
 
-    logger.info(f"Preparing to upload {len(df)} rows to Google Sheet. (Worksheet: '{worksheet_name}')")
+    logger.info(f"Preparing to merge-upload {len(df)} new rows → '{worksheet_name}'")
 
     if not os.path.exists(creds_file):
-        logger.error(f"Credentials file '{creds_file}' not found. Skipping Google Sheets upload.")
+        logger.error(f"Credentials file '{creds_file}' not found. Skipping upload.")
         return False
-
     if not sheet_id:
         logger.error("GOOGLE_SHEET_ID not set in .env. Skipping upload.")
         return False
@@ -148,10 +220,9 @@ def upload_to_google_sheets(df: pd.DataFrame):
         try:
             sheet = client.open_by_key(sheet_id)
         except gspread.exceptions.SpreadsheetNotFound:
-            logger.error("Google Sheet not found. Ensure the sheet is shared with the service account email.")
+            logger.error("Google Sheet not found. Check that it is shared with the service account.")
             return False
 
-        # Get or create worksheet
         try:
             worksheet = sheet.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:
@@ -159,15 +230,34 @@ def upload_to_google_sheets(df: pd.DataFrame):
             worksheet = sheet.add_worksheet(
                 title=worksheet_name,
                 rows=max(len(df) + 10, 100),
-                cols=max(len(df.columns) + 5, 20),
+                cols=max(len(RAW_DUMP_COLS) + 5, 30),
             )
 
-        # Prepare: keep numerics as numbers so Sheets stores them in Number format.
-        import numpy as np
-        df_upload = df.copy()
+        # 1. Read history from the sheet
+        logger.info("Reading existing Raw Dump from Google Sheets…")
+        existing_df = _read_existing_raw_dump(worksheet)
+        logger.info(f"Existing rows in sheet: {len(existing_df)}")
+
+        # 2. Normalise incoming df before merge
+        new_df = df.copy()
+        for col in _DEDUP_KEYS:
+            if col in new_df.columns:
+                new_df[col] = new_df[col].astype(str).str.strip()
+
+        # 3. Merge new data with full history
+        merged_df = _merge_with_history(existing_df, new_df)
+        logger.info(f"Total rows after merge: {len(merged_df)}")
+
+        # 4. Prepare for upload — numerics stay numeric, strings stay string
+        df_upload = merged_df.copy()
+        _numeric_cols = {
+            "spend", "impressions", "cpm", "cpc", "ctr", "link_clicks",
+            "landing_page_views", "c2v_ratio", "cost_per_result", "roas",
+            "cvr", "add_to_cart", "leads", "purchases", "revenue",
+        }
         for col in df_upload.columns:
-            if pd.api.types.is_numeric_dtype(df_upload[col]):
-                df_upload[col] = df_upload[col].fillna(0)
+            if col in _numeric_cols:
+                df_upload[col] = pd.to_numeric(df_upload[col], errors="coerce").fillna(0)
             else:
                 df_upload[col] = df_upload[col].fillna("").astype(str)
 
@@ -180,20 +270,19 @@ def upload_to_google_sheets(df: pd.DataFrame):
             [_native(v) for v in row] for row in df_upload.values.tolist()
         ]
 
-        # Clear existing data
+        # 5. Clear and rewrite (pivot tables survive because column order is fixed)
         worksheet.clear()
         time.sleep(0.5)
 
-        # Upload in chunks to avoid API payload limits
         for chunk_start in range(0, len(all_values), _CHUNK_ROWS):
             chunk = all_values[chunk_start : chunk_start + _CHUNK_ROWS]
-            start_row = chunk_start + 1  # 1-indexed
+            start_row = chunk_start + 1
             worksheet.update(f"A{start_row}", chunk, value_input_option="USER_ENTERED")
             logger.info(f"  Uploaded rows {chunk_start + 1}–{chunk_start + len(chunk)}…")
             if chunk_start + _CHUNK_ROWS < len(all_values):
-                time.sleep(1)  # respect quota
+                time.sleep(1)
 
-        logger.info(f"SUCCESS: Uploaded {len(df)} rows to '{worksheet_name}'.")
+        logger.info(f"SUCCESS: Raw Dump now has {len(merged_df)} total rows in '{worksheet_name}'.")
         return True
 
     except Exception as e:

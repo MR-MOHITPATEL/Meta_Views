@@ -551,31 +551,7 @@ with _tab_builder:
             )
             if _chosen_saved != "— select —":
                 if st.button("📂 Load", key="vb_load_btn", use_container_width=True):
-                    _cfg = _saved[_chosen_saved]
-                    # Set widget keys directly — Streamlit ignores default= if the key
-                    # already exists in session_state, so we must override it here.
-                    st.session_state["vb_dimensions"]       = _cfg.get("dimensions", [])
-                    st.session_state["vb_metrics"]          = _cfg.get("metrics", DEFAULT_METRICS)
-                    st.session_state["vb_flt_camps"]        = _cfg.get("filter_campaigns", [])
-                    st.session_state["vb_flt_adsets"]       = _cfg.get("filter_adsets", [])
-                    st.session_state["vb_flt_ads"]          = _cfg.get("filter_ads", [])
-                    st.session_state["vb_sheets_tab_input"] = _cfg.get("sheets_tab", "")
-                    # Metric filters — restore checkbox + values
-                    st.session_state["vb_cpt_enabled"] = bool(_cfg.get("cpt_min") or _cfg.get("cpt_max"))
-                    st.session_state["vb_ctr_enabled"] = bool(_cfg.get("ctr_min") or _cfg.get("ctr_max"))
-                    st.session_state["vb_rev_enabled"] = bool(_cfg.get("revenue_min") or _cfg.get("revenue_max"))
-                    st.session_state["vb_cpt_min"] = float(_cfg["cpt_min"]) if _cfg.get("cpt_min") else 0.0
-                    st.session_state["vb_cpt_max"] = float(_cfg["cpt_max"]) if _cfg.get("cpt_max") else 0.0
-                    st.session_state["vb_ctr_min"] = float(_cfg["ctr_min"]) if _cfg.get("ctr_min") else 0.0
-                    st.session_state["vb_ctr_max"] = float(_cfg["ctr_max"]) if _cfg.get("ctr_max") else 0.0
-                    st.session_state["vb_rev_min"] = float(_cfg["revenue_min"]) if _cfg.get("revenue_min") else 0.0
-                    st.session_state["vb_rev_max"] = float(_cfg["revenue_max"]) if _cfg.get("revenue_max") else 0.0
-                    # Dates: convert ISO string → date object (or None)
-                    _df_str = _cfg.get("date_from")
-                    _dt_str = _cfg.get("date_to")
-                    st.session_state["vb_date_from"] = pd.Timestamp(_df_str).date() if _df_str else None
-                    st.session_state["vb_date_to"]   = pd.Timestamp(_dt_str).date() if _dt_str else None
-                    st.session_state["vb_loaded"] = _cfg
+                    st.session_state["vb_loaded"] = _saved[_chosen_saved]
                     st.rerun()
                 if st.button("🗑️ Delete", key="vb_delete_btn", use_container_width=True):
                     delete_config(_chosen_saved)
@@ -587,6 +563,48 @@ with _tab_builder:
     # Restore loaded config into widget state
     _loaded_cfg = st.session_state.pop("vb_loaded", None)
 
+    # If a saved config was just loaded, push its values into session state.
+    # This must happen BEFORE the widgets render so they pick up the new values.
+    if _loaded_cfg:
+        st.session_state["vb_dimensions"]       = _loaded_cfg.get("dimensions", ["Campaign name", "Ad name"])
+        st.session_state["vb_metrics"]          = _loaded_cfg.get("metrics", DEFAULT_METRICS)
+        st.session_state["vb_flt_camps"]        = _loaded_cfg.get("filter_campaigns", [])
+        st.session_state["vb_flt_adsets"]       = _loaded_cfg.get("filter_adsets", [])
+        st.session_state["vb_flt_ads"]          = _loaded_cfg.get("filter_ads", [])
+        _df_str = _loaded_cfg.get("date_from")
+        _dt_str = _loaded_cfg.get("date_to")
+        st.session_state["vb_date_from"]        = pd.Timestamp(_df_str).date() if _df_str else None
+        st.session_state["vb_date_to"]          = pd.Timestamp(_dt_str).date() if _dt_str else None
+        st.session_state["vb_cpt_enabled"]      = bool(_loaded_cfg.get("cpt_min") or _loaded_cfg.get("cpt_max"))
+        st.session_state["vb_ctr_enabled"]      = bool(_loaded_cfg.get("ctr_min") or _loaded_cfg.get("ctr_max"))
+        st.session_state["vb_rev_enabled"]      = bool(_loaded_cfg.get("revenue_min") or _loaded_cfg.get("revenue_max"))
+        st.session_state["vb_cpt_min"]          = float(_loaded_cfg["cpt_min"]) if _loaded_cfg.get("cpt_min") else 0.0
+        st.session_state["vb_cpt_max"]          = float(_loaded_cfg["cpt_max"]) if _loaded_cfg.get("cpt_max") else 0.0
+        st.session_state["vb_ctr_min"]          = float(_loaded_cfg["ctr_min"]) if _loaded_cfg.get("ctr_min") else 0.0
+        st.session_state["vb_ctr_max"]          = float(_loaded_cfg["ctr_max"]) if _loaded_cfg.get("ctr_max") else 0.0
+        st.session_state["vb_rev_min"]          = float(_loaded_cfg["revenue_min"]) if _loaded_cfg.get("revenue_min") else 0.0
+        st.session_state["vb_rev_max"]          = float(_loaded_cfg["revenue_max"]) if _loaded_cfg.get("revenue_max") else 0.0
+        st.session_state["vb_sheets_tab_input"] = _loaded_cfg.get("sheets_tab", "")
+
+    # Initialize defaults only on first render (setdefault never overwrites existing state)
+    st.session_state.setdefault("vb_dimensions", ["Campaign name", "Ad name"])
+    st.session_state.setdefault("vb_metrics", DEFAULT_METRICS)
+    st.session_state.setdefault("vb_flt_camps", [])
+    st.session_state.setdefault("vb_flt_adsets", [])
+    st.session_state.setdefault("vb_flt_ads", [])
+    st.session_state.setdefault("vb_date_from", None)
+    st.session_state.setdefault("vb_date_to", None)
+    st.session_state.setdefault("vb_cpt_enabled", False)
+    st.session_state.setdefault("vb_ctr_enabled", False)
+    st.session_state.setdefault("vb_rev_enabled", False)
+    st.session_state.setdefault("vb_cpt_min", 0.0)
+    st.session_state.setdefault("vb_cpt_max", 0.0)
+    st.session_state.setdefault("vb_ctr_min", 0.0)
+    st.session_state.setdefault("vb_ctr_max", 0.0)
+    st.session_state.setdefault("vb_rev_min", 0.0)
+    st.session_state.setdefault("vb_rev_max", 0.0)
+    st.session_state.setdefault("vb_sheets_tab_input", "")
+
     st.divider()
 
     # ── Dimension & Metric selectors ──────────────────────────────────────────
@@ -594,23 +612,18 @@ with _tab_builder:
 
     with _d_col:
         st.markdown("**📐 Dimensions** *(group by)*")
-        _default_dims = _loaded_cfg.get("dimensions", ["Campaign name", "Ad name"]) \
-            if _loaded_cfg else ["Campaign name", "Ad name"]
         _sel_dims = st.multiselect(
             "Select dimensions",
             options=ALL_DIMENSIONS,
-            default=_default_dims,
             key="vb_dimensions",
             help="Rows in your result table. Order matters — first = outermost group.",
         )
 
     with _m_col:
         st.markdown("**📊 Metrics** *(columns)*")
-        _default_mets = _loaded_cfg.get("metrics", DEFAULT_METRICS) if _loaded_cfg else DEFAULT_METRICS
         _sel_mets = st.multiselect(
             "Select metrics",
             options=ALL_METRICS,
-            default=_default_mets,
             key="vb_metrics",
             help="Additive metrics are summed; ratio metrics (CTR, CPT, ROAS…) are recomputed.",
         )
@@ -619,17 +632,9 @@ with _tab_builder:
     st.markdown("**📅 Date Range**")
     _r1, _r2, _r3 = st.columns(3)
     with _r1:
-        _default_df = _loaded_cfg.get("date_from") if _loaded_cfg else None
-        _date_from = st.date_input(
-            "From", value=pd.Timestamp(_default_df) if _default_df else None,
-            key="vb_date_from",
-        )
+        _date_from = st.date_input("From", key="vb_date_from")
     with _r2:
-        _default_dt = _loaded_cfg.get("date_to") if _loaded_cfg else None
-        _date_to = st.date_input(
-            "To", value=pd.Timestamp(_default_dt) if _default_dt else None,
-            key="vb_date_to",
-        )
+        _date_to = st.date_input("To", key="vb_date_to")
     with _r3:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("✖ Clear dates", key="vb_clear_dates"):
@@ -651,45 +656,34 @@ with _tab_builder:
         _camp_opts = _adset_opts = _ad_opts = []
 
     with _f1:
-        _flt_camps = st.multiselect("Campaigns", options=_camp_opts,
-                                    default=_loaded_cfg.get("filter_campaigns", []) if _loaded_cfg else [],
-                                    key="vb_flt_camps")
+        _flt_camps = st.multiselect("Campaigns", options=_camp_opts, key="vb_flt_camps")
     with _f2:
-        _flt_adsets = st.multiselect("Ad Sets", options=_adset_opts,
-                                     default=_loaded_cfg.get("filter_adsets", []) if _loaded_cfg else [],
-                                     key="vb_flt_adsets")
+        _flt_adsets = st.multiselect("Ad Sets", options=_adset_opts, key="vb_flt_adsets")
     with _f3:
-        _flt_ads = st.multiselect("Ad Names", options=_ad_opts,
-                                  default=_loaded_cfg.get("filter_ads", []) if _loaded_cfg else [],
-                                  key="vb_flt_ads")
+        _flt_ads = st.multiselect("Ad Names", options=_ad_opts, key="vb_flt_ads")
 
     st.divider()
 
     # ── Metric Threshold Filters ──────────────────────────────────────────────
     st.markdown("**🎯 Metric Filters** *(tick a checkbox to enable that filter)*")
 
-    # Helper to safely read saved float values
+    # Helper to safely read saved float values (reads from session state, not _loaded_cfg)
     def _saved_float(key):
-        v = _loaded_cfg.get(key) if _loaded_cfg else None
-        return float(v) if v is not None else 0.0
+        return float(st.session_state.get(f"vb_{key}", 0.0) or 0.0)
 
     _mf1, _mf2, _mf3 = st.columns(3)
 
     # ── CPT filter ────────────────────────────────────────────────────────────
     with _mf1:
-        _cpt_enabled = st.checkbox(
-            "Filter by CPT (₹)", key="vb_cpt_enabled",
-            value=bool(_loaded_cfg and (_loaded_cfg.get("cpt_min") or _loaded_cfg.get("cpt_max")))
-            if _loaded_cfg else False,
-        )
+        _cpt_enabled = st.checkbox("Filter by CPT (₹)", key="vb_cpt_enabled")
         if _cpt_enabled:
             _cc1, _cc2 = st.columns(2)
             with _cc1:
-                _cpt_min_val = st.number_input("Min ₹", value=_saved_float("cpt_min"),
-                                               min_value=0.0, step=10.0, key="vb_cpt_min", format="%.2f")
+                _cpt_min_val = st.number_input("Min ₹", min_value=0.0, step=10.0,
+                                               key="vb_cpt_min", format="%.2f")
             with _cc2:
-                _cpt_max_val = st.number_input("Max ₹", value=_saved_float("cpt_max"),
-                                               min_value=0.0, step=10.0, key="vb_cpt_max", format="%.2f")
+                _cpt_max_val = st.number_input("Max ₹", min_value=0.0, step=10.0,
+                                               key="vb_cpt_max", format="%.2f")
             _cpt_min_val = _cpt_min_val if _cpt_min_val > 0 else None
             _cpt_max_val = _cpt_max_val if _cpt_max_val > 0 else None
         else:
@@ -697,19 +691,15 @@ with _tab_builder:
 
     # ── CTR filter ────────────────────────────────────────────────────────────
     with _mf2:
-        _ctr_enabled = st.checkbox(
-            "Filter by CTR (%)", key="vb_ctr_enabled",
-            value=bool(_loaded_cfg and (_loaded_cfg.get("ctr_min") or _loaded_cfg.get("ctr_max")))
-            if _loaded_cfg else False,
-        )
+        _ctr_enabled = st.checkbox("Filter by CTR (%)", key="vb_ctr_enabled")
         if _ctr_enabled:
             _tc1, _tc2 = st.columns(2)
             with _tc1:
-                _ctr_min_val = st.number_input("Min %", value=_saved_float("ctr_min"),
-                                               min_value=0.0, step=0.1, key="vb_ctr_min", format="%.2f")
+                _ctr_min_val = st.number_input("Min %", min_value=0.0, step=0.1,
+                                               key="vb_ctr_min", format="%.2f")
             with _tc2:
-                _ctr_max_val = st.number_input("Max %", value=_saved_float("ctr_max"),
-                                               min_value=0.0, step=0.1, key="vb_ctr_max", format="%.2f")
+                _ctr_max_val = st.number_input("Max %", min_value=0.0, step=0.1,
+                                               key="vb_ctr_max", format="%.2f")
             _ctr_min_val = _ctr_min_val if _ctr_min_val > 0 else None
             _ctr_max_val = _ctr_max_val if _ctr_max_val > 0 else None
         else:
@@ -717,19 +707,15 @@ with _tab_builder:
 
     # ── Revenue filter ────────────────────────────────────────────────────────
     with _mf3:
-        _rev_enabled = st.checkbox(
-            "Filter by Revenue (₹)", key="vb_rev_enabled",
-            value=bool(_loaded_cfg and (_loaded_cfg.get("revenue_min") or _loaded_cfg.get("revenue_max")))
-            if _loaded_cfg else False,
-        )
+        _rev_enabled = st.checkbox("Filter by Revenue (₹)", key="vb_rev_enabled")
         if _rev_enabled:
             _rc1, _rc2 = st.columns(2)
             with _rc1:
-                _rev_min_val = st.number_input("Min ₹", value=_saved_float("revenue_min"),
-                                               min_value=0.0, step=100.0, key="vb_rev_min", format="%.2f")
+                _rev_min_val = st.number_input("Min ₹", min_value=0.0, step=100.0,
+                                               key="vb_rev_min", format="%.2f")
             with _rc2:
-                _rev_max_val = st.number_input("Max ₹", value=_saved_float("revenue_max"),
-                                               min_value=0.0, step=100.0, key="vb_rev_max", format="%.2f")
+                _rev_max_val = st.number_input("Max ₹", min_value=0.0, step=100.0,
+                                               key="vb_rev_max", format="%.2f")
             _rev_min_val = _rev_min_val if _rev_min_val > 0 else None
             _rev_max_val = _rev_max_val if _rev_max_val > 0 else None
         else:

@@ -27,7 +27,13 @@ SCOPES = [
 
 
 def _get_client() -> gspread.Client:
-    creds = Credentials.from_service_account_file(CREDENTIALS_PATH, scopes=SCOPES)
+    # On Streamlit Cloud, credentials come from st.secrets instead of a file
+    if "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=SCOPES
+        )
+    else:
+        creds = Credentials.from_service_account_file(CREDENTIALS_PATH, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -45,7 +51,8 @@ def load_sheet(dataset_key: str) -> pd.DataFrame:
     spreadsheet = client.open_by_key(SHEET_ID)
     worksheet = spreadsheet.worksheet(tab_name)
 
-    records = worksheet.get_all_records()
+    # value_render_option="FORMATTED_VALUE" keeps IDs as strings (avoids 1.2e+17 precision loss)
+    records = worksheet.get_all_records(value_render_option="FORMATTED_VALUE")
     df = pd.DataFrame(records)
 
     # If Raw Dump sheet is empty, fall back to local Excel file
@@ -58,6 +65,12 @@ def load_sheet(dataset_key: str) -> pd.DataFrame:
 
     # Normalise column names: strip whitespace
     df.columns = [c.strip() for c in df.columns]
+
+    # Force ID columns to string to prevent scientific-notation precision loss
+    _id_cols = ["Ad ID", "Ad set ID", "Campaign ID", "ad_id", "ad_set_id", "campaign_id"]
+    for col in _id_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().replace("nan", "")
 
     # Parse date column if present
     for col in ("Date", "date"):
