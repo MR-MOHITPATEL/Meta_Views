@@ -126,20 +126,17 @@ RAW_DUMP_COLS = [
     "c2v_ratio", "cost_per_result", "roas", "cvr", "add_to_cart", "leads", "purchases", "revenue",
 ]
 
-# Uniqueness key for deduplication: one row per ad per day
-_DEDUP_KEYS = ["date", "campaign_id", "adset_id", "ad_name"]
+# Dedup by text fields only — IDs (campaign_id, adset_id) are integers and
+# lose precision when Google Sheets stores them as floats (1202445745086 → 1200000000000).
+# Text fields (campaign_name, adset_name, ad_name) are immune to this problem.
+_DEDUP_KEYS = ["date", "campaign_name", "adset_name", "ad_name"]
 
-# ID columns that must always be stored as full integer strings (never as floats)
+# ID columns that must be stored as plain text strings in Google Sheets
 _ID_COLS = ["campaign_id", "adset_id"]
 
 
 def _normalize_id(val) -> str:
-    """
-    Convert any ID representation to a plain integer string.
-    Handles: '1.20E+17' → '120244574508860015'
-             1202445745086.0 → '1202445745086'
-             '1202445745086' → '1202445745086'
-    """
+    """Convert any numeric ID representation to a plain integer string."""
     s = str(val).strip().replace(",", "")
     try:
         return str(int(float(s)))
@@ -147,14 +144,15 @@ def _normalize_id(val) -> str:
         return s
 
 
-def _normalize_ids(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply _normalize_id to all ID columns so deduplication works correctly."""
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize ID and text key columns so comparisons work correctly."""
     df = df.copy()
     for col in _ID_COLS:
         if col in df.columns:
             df[col] = df[col].apply(_normalize_id)
-    if "ad_name" in df.columns:
-        df["ad_name"] = df["ad_name"].astype(str).str.strip()
+    for col in ["campaign_name", "adset_name", "ad_name"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     return df
@@ -163,17 +161,16 @@ def _normalize_ids(df: pd.DataFrame) -> pd.DataFrame:
 def _read_existing_raw_dump(worksheet) -> pd.DataFrame:
     """
     Read whatever is currently in the Raw Dump worksheet.
-    Returns an empty DataFrame if the sheet is blank.
-    IDs are normalized immediately so dedup works even if the sheet stored
-    them in scientific notation (1.20E+17 → full integer string).
+    Uses UNFORMATTED_VALUE so numeric IDs come back as actual numbers
+    (not display strings like '1.20E+12' which have lost precision).
     """
     try:
-        records = worksheet.get_all_records(value_render_option="FORMATTED_VALUE")
+        records = worksheet.get_all_records(value_render_option="UNFORMATTED_VALUE")
         if not records:
             return pd.DataFrame()
         df = pd.DataFrame(records)
         df.columns = [c.strip() for c in df.columns]
-        df = _normalize_ids(df)
+        df = _normalize_df(df)
         return df
     except Exception as e:
         logger.warning(f"Could not read existing Raw Dump: {e}. Starting fresh.")
@@ -182,25 +179,22 @@ def _read_existing_raw_dump(worksheet) -> pd.DataFrame:
 
 def _merge_with_history(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Merge new_df into existing_df:
-    - New rows are appended.
-    - Rows that share the same date+campaign_id+adset_id+ad_name are updated
-      with the fresh values (new fetch wins — keeps latest Meta attribution).
-    - Column order is always RAW_DUMP_COLS.
+    Merge new_df into existing_df.
+    Dedup key: date + campaign_name + adset_name + ad_name (text only — never loses precision).
+    New fetch always wins so Meta's latest attribution numbers are kept.
     """
-    # Normalize IDs in both frames before any merge/dedup
-    new_df = _normalize_ids(new_df)
+    new_df = _normalize_df(new_df)
 
     if existing_df.empty:
         merged = new_df.copy()
     else:
-        existing_df = _normalize_ids(existing_df)
-        # Concat: existing first, new last → keep='last' retains the fresh values
+        existing_df = _normalize_df(existing_df)
+        # Concat: existing first, new last → keep='last' retains fresh values
         merged = pd.concat([existing_df, new_df], ignore_index=True)
 
-    existing_keys = [k for k in _DEDUP_KEYS if k in merged.columns]
+    active_keys = [k for k in _DEDUP_KEYS if k in merged.columns]
     before = len(merged)
-    merged = merged.drop_duplicates(subset=existing_keys, keep="last")
+    merged = merged.drop_duplicates(subset=active_keys, keep="last")
     logger.info(f"History merge: {before} rows → {len(merged)} after dedup "
                 f"({before - len(merged)} duplicates removed).")
 
@@ -210,7 +204,7 @@ def _merge_with_history(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.D
         merged = merged.sort_values("date", ascending=False)
         merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
 
-    # Enforce canonical column order — add missing cols as empty, drop unknown extras
+    # Enforce canonical column order
     for col in RAW_DUMP_COLS:
         if col not in merged.columns:
             merged[col] = ""
