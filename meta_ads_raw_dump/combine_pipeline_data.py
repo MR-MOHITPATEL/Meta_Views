@@ -129,11 +129,43 @@ RAW_DUMP_COLS = [
 # Uniqueness key for deduplication: one row per ad per day
 _DEDUP_KEYS = ["date", "campaign_id", "adset_id", "ad_name"]
 
+# ID columns that must always be stored as full integer strings (never as floats)
+_ID_COLS = ["campaign_id", "adset_id"]
+
+
+def _normalize_id(val) -> str:
+    """
+    Convert any ID representation to a plain integer string.
+    Handles: '1.20E+17' → '120244574508860015'
+             1202445745086.0 → '1202445745086'
+             '1202445745086' → '1202445745086'
+    """
+    s = str(val).strip().replace(",", "")
+    try:
+        return str(int(float(s)))
+    except (ValueError, TypeError):
+        return s
+
+
+def _normalize_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply _normalize_id to all ID columns so deduplication works correctly."""
+    df = df.copy()
+    for col in _ID_COLS:
+        if col in df.columns:
+            df[col] = df[col].apply(_normalize_id)
+    if "ad_name" in df.columns:
+        df["ad_name"] = df["ad_name"].astype(str).str.strip()
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return df
+
 
 def _read_existing_raw_dump(worksheet) -> pd.DataFrame:
     """
     Read whatever is currently in the Raw Dump worksheet.
     Returns an empty DataFrame if the sheet is blank.
+    IDs are normalized immediately so dedup works even if the sheet stored
+    them in scientific notation (1.20E+17 → full integer string).
     """
     try:
         records = worksheet.get_all_records(value_render_option="FORMATTED_VALUE")
@@ -141,6 +173,7 @@ def _read_existing_raw_dump(worksheet) -> pd.DataFrame:
             return pd.DataFrame()
         df = pd.DataFrame(records)
         df.columns = [c.strip() for c in df.columns]
+        df = _normalize_ids(df)
         return df
     except Exception as e:
         logger.warning(f"Could not read existing Raw Dump: {e}. Starting fresh.")
@@ -155,14 +188,13 @@ def _merge_with_history(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.D
       with the fresh values (new fetch wins — keeps latest Meta attribution).
     - Column order is always RAW_DUMP_COLS.
     """
+    # Normalize IDs in both frames before any merge/dedup
+    new_df = _normalize_ids(new_df)
+
     if existing_df.empty:
         merged = new_df.copy()
     else:
-        # Normalise key columns in existing data so dedup works correctly
-        for col in _DEDUP_KEYS:
-            if col in existing_df.columns:
-                existing_df[col] = existing_df[col].astype(str).str.strip()
-
+        existing_df = _normalize_ids(existing_df)
         # Concat: existing first, new last → keep='last' retains the fresh values
         merged = pd.concat([existing_df, new_df], ignore_index=True)
 
@@ -170,7 +202,7 @@ def _merge_with_history(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.D
     before = len(merged)
     merged = merged.drop_duplicates(subset=existing_keys, keep="last")
     logger.info(f"History merge: {before} rows → {len(merged)} after dedup "
-                f"({before - len(merged)} updated/removed).")
+                f"({before - len(merged)} duplicates removed).")
 
     # Sort: latest date first
     if "date" in merged.columns:
@@ -255,9 +287,16 @@ def upload_to_google_sheets(df: pd.DataFrame):
             "landing_page_views", "c2v_ratio", "cost_per_result", "roas",
             "cvr", "add_to_cart", "leads", "purchases", "revenue",
         }
+        # ID columns must be stored as plain text strings so Google Sheets
+        # never converts them to floats (which causes 1.20E+17 scientific notation
+        # and breaks deduplication on the next fetch).
+        _str_cols = set(_ID_COLS) | {"date", "campaign_name", "adset_name", "ad_name",
+                                      "image_url", "pincodes"}
         for col in df_upload.columns:
             if col in _numeric_cols:
                 df_upload[col] = pd.to_numeric(df_upload[col], errors="coerce").fillna(0)
+            elif col in _str_cols:
+                df_upload[col] = df_upload[col].fillna("").astype(str)
             else:
                 df_upload[col] = df_upload[col].fillna("").astype(str)
 
@@ -266,9 +305,22 @@ def upload_to_google_sheets(df: pd.DataFrame):
             if isinstance(v, np.floating): return float(v)
             return v
 
-        all_values = [df_upload.columns.tolist()] + [
-            [_native(v) for v in row] for row in df_upload.values.tolist()
-        ]
+        # Prefix ID columns with a single-quote so Sheets treats them as text,
+        # preventing automatic conversion to scientific notation.
+        id_col_indices = {i for i, c in enumerate(df_upload.columns) if c in _ID_COLS}
+
+        header = df_upload.columns.tolist()
+        data_rows = []
+        for row in df_upload.values.tolist():
+            formatted = []
+            for i, v in enumerate(row):
+                if i in id_col_indices:
+                    formatted.append("'" + str(v))   # leading ' forces text in Sheets
+                else:
+                    formatted.append(_native(v))
+            data_rows.append(formatted)
+
+        all_values = [header] + data_rows
 
         # 5. Clear and rewrite (pivot tables survive because column order is fixed)
         worksheet.clear()
