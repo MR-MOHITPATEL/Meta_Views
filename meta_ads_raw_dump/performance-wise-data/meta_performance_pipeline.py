@@ -41,8 +41,10 @@ def fetch_performance_insights(config: dict, start_date: str = None, end_date: s
             start = backfill_date
             logger.info(f"Using BACKFILL_START_DATE override: {start}")
         else:
-            # Default: 7-day rolling lookback to ensure late-arriving data is captured
-            lookback_date = datetime.date.today() - datetime.timedelta(days=7)
+            # 2-day rolling lookback: fetches yesterday + today.
+            # Yesterday ensures complete data (Meta finalises the previous day overnight).
+            # Today captures any intraday spend already recorded.
+            lookback_date = datetime.date.today() - datetime.timedelta(days=2)
             start = lookback_date.strftime("%Y-%m-%d")
     else:
         start = start_date

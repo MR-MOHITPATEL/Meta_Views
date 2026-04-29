@@ -942,18 +942,51 @@ with st.sidebar:
     st.caption("Runs the Meta Ads pipeline to pull fresh data from the API, combines it, and uploads to Raw Dump.")
     if st.button("📥 Fetch Current Results", type="primary", use_container_width=True):
         fetch_box = st.empty()
+        _tmp_creds_path = None
         try:
-            import os
+            import os, json, tempfile
+
             pipeline_dir = os.path.normpath(
                 os.path.join(os.path.dirname(__file__), "..", "meta_ads_raw_dump")
             )
             run_all_script = os.path.join(pipeline_dir, "run_all.py")
+
+            # Build subprocess environment: start from current env, then inject
+            # all Streamlit secrets so the pipeline works on Streamlit Cloud
+            # (where there is no .env file or Credentials.json on disk).
+            sub_env = os.environ.copy()
+
+            # Inject scalar secrets as environment variables
+            _secret_keys = [
+                "META_ACCESS_TOKEN", "AD_ACCOUNT_ID", "API_VERSION",
+                "DEFAULT_START_DATE", "GOOGLE_SHEET_ID", "GOOGLE_WORKSHEET_NAME",
+                "GOOGLE_CREDENTIALS_FILE", "GEMINI_API_KEY",
+            ]
+            for key in _secret_keys:
+                try:
+                    sub_env[key] = str(st.secrets[key])
+                except Exception:
+                    pass  # key not in secrets — already in os.environ or not needed
+
+            # Write gcp_service_account credentials to a temp file so the pipeline
+            # can use Credentials.from_service_account_file() on Streamlit Cloud.
+            if "gcp_service_account" in st.secrets:
+                _creds_dict = dict(st.secrets["gcp_service_account"])
+                _tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False, dir=pipeline_dir
+                )
+                json.dump(_creds_dict, _tmp)
+                _tmp.close()
+                _tmp_creds_path = _tmp.name
+                sub_env["GOOGLE_CREDENTIALS_FILE"] = os.path.basename(_tmp_creds_path)
+
             fetch_box.info("Running Meta Ads pipeline… this may take a few minutes.")
             result = subprocess.run(
                 [sys.executable, run_all_script],
                 cwd=pipeline_dir,
                 capture_output=True,
                 text=True,
+                env=sub_env,
             )
             if result.returncode == 0:
                 load_sheet.clear()
@@ -967,6 +1000,13 @@ with st.sidebar:
             fetch_box.error(f"Error: {e}")
             with st.expander("Traceback"):
                 st.code(traceback.format_exc())
+        finally:
+            # Always clean up the temp credentials file
+            if _tmp_creds_path and os.path.exists(_tmp_creds_path):
+                try:
+                    os.unlink(_tmp_creds_path)
+                except Exception:
+                    pass
 
     st.divider()
 
