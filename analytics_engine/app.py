@@ -937,9 +937,9 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Fetch Current Results (run full Meta pipeline) ─────────────────────────
+    # ── Fetch Current Results (run full Meta pipeline + auto refresh views) ──────
     st.subheader("📥 Fetch Current Results")
-    st.caption("Runs the Meta Ads pipeline to pull fresh data from the API, combines it, and uploads to Raw Dump.")
+    st.caption("Fetches fresh data from Meta API, updates Raw Dump, then rebuilds all views automatically.")
     if st.button("📥 Fetch Current Results", type="primary", use_container_width=True):
         fetch_box = st.empty()
         _tmp_creds_path = None
@@ -951,12 +951,8 @@ with st.sidebar:
             )
             run_all_script = os.path.join(pipeline_dir, "run_all.py")
 
-            # Build subprocess environment: start from current env, then inject
-            # all Streamlit secrets so the pipeline works on Streamlit Cloud
-            # (where there is no .env file or Credentials.json on disk).
+            # Build subprocess environment with all secrets injected
             sub_env = os.environ.copy()
-
-            # Inject scalar secrets as environment variables
             _secret_keys = [
                 "META_ACCESS_TOKEN", "AD_ACCOUNT_ID", "API_VERSION",
                 "DEFAULT_START_DATE", "GOOGLE_SHEET_ID", "GOOGLE_WORKSHEET_NAME",
@@ -966,10 +962,8 @@ with st.sidebar:
                 try:
                     sub_env[key] = str(st.secrets[key])
                 except Exception:
-                    pass  # key not in secrets — already in os.environ or not needed
+                    pass
 
-            # Write gcp_service_account credentials to a temp file so the pipeline
-            # can use Credentials.from_service_account_file() on Streamlit Cloud.
             if "gcp_service_account" in st.secrets:
                 _creds_dict = dict(st.secrets["gcp_service_account"])
                 _tmp = tempfile.NamedTemporaryFile(
@@ -980,7 +974,8 @@ with st.sidebar:
                 _tmp_creds_path = _tmp.name
                 sub_env["GOOGLE_CREDENTIALS_FILE"] = os.path.basename(_tmp_creds_path)
 
-            fetch_box.info("Running Meta Ads pipeline… this may take a few minutes.")
+            # ── Step 1: Run Meta pipeline ──────────────────────────────────────
+            fetch_box.info("⏳ Step 1/3 — Fetching data from Meta API… (this takes 1-2 min)")
             result = subprocess.run(
                 [sys.executable, run_all_script],
                 cwd=pipeline_dir,
@@ -988,20 +983,41 @@ with st.sidebar:
                 text=True,
                 env=sub_env,
             )
-            if result.returncode == 0:
-                load_sheet.clear()
-                fetch_box.success("Pipeline completed! Raw Dump updated in Google Sheets.")
-            else:
-                fetch_box.error("Pipeline failed.")
-                with st.expander("Pipeline output"):
+            if result.returncode != 0:
+                fetch_box.error("❌ Pipeline failed — data was NOT updated.")
+                with st.expander("Pipeline error output"):
                     st.code(result.stdout[-3000:] + "\n" + result.stderr[-2000:])
+                st.stop()
+
+            load_sheet.clear()
+            fetch_box.info("✅ Step 1/3 done — Raw Dump updated.\n⏳ Step 2/3 — Building analytics views…")
+
+            # ── Step 2: Rebuild all views from new Raw Dump ────────────────────
+            raw_df = load_sheet("raw_dump")
+            if raw_df.empty:
+                fetch_box.warning("Raw Dump is empty after pipeline — check pipeline logs.")
+                st.stop()
+
+            views = build_all_views(raw_df)
+            fetch_box.info(f"✅ Step 2/3 done — {sum(len(v) for v in views.values()):,} rows built.\n"
+                           f"⏳ Step 3/3 — Writing views to Google Sheets…")
+
+            # ── Step 3: Write views to Google Sheets ──────────────────────────
+            write_all_views(views)
+            load_sheet.clear()
+
+            row_summary = " | ".join(f"{k}: {len(v)}" for k, v in views.items())
+            fetch_box.success(
+                f"🎉 Done! Data is ready.\n\n"
+                f"Raw Dump + all views updated in Google Sheets.\n{row_summary}"
+            )
+
         except Exception as e:
             import traceback
             fetch_box.error(f"Error: {e}")
             with st.expander("Traceback"):
                 st.code(traceback.format_exc())
         finally:
-            # Always clean up the temp credentials file
             if _tmp_creds_path and os.path.exists(_tmp_creds_path):
                 try:
                     os.unlink(_tmp_creds_path)
