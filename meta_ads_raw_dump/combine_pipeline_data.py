@@ -228,9 +228,16 @@ def upload_to_google_sheets(df: pd.DataFrame):
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     worksheet_name = os.getenv("GOOGLE_WORKSHEET_NAME", "Raw Dump")
     creds_file_name = os.getenv("GOOGLE_CREDENTIALS_FILE", "Credentials.json")
-    creds_file = os.path.join(os.path.dirname(__file__), "..", creds_file_name)
+
+    # Support both absolute paths (passed from Streamlit Cloud via env var)
+    # and bare filenames (resolved relative to project root)
+    if os.path.isabs(creds_file_name):
+        creds_file = creds_file_name
+    else:
+        creds_file = os.path.join(os.path.dirname(__file__), "..", creds_file_name)
 
     logger.info(f"Preparing to merge-upload {len(df)} new rows → '{worksheet_name}'")
+    logger.info(f"Using credentials file: {creds_file}")
 
     if not os.path.exists(creds_file):
         logger.error(f"Credentials file '{creds_file}' not found. Skipping upload.")

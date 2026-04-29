@@ -966,13 +966,16 @@ with st.sidebar:
 
             if "gcp_service_account" in st.secrets:
                 _creds_dict = dict(st.secrets["gcp_service_account"])
+                # Write temp credentials to project root (where combine_pipeline_data.py looks)
+                _project_root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
                 _tmp = tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False, dir=pipeline_dir
+                    mode="w", suffix=".json", delete=False, dir=_project_root
                 )
                 json.dump(_creds_dict, _tmp)
                 _tmp.close()
                 _tmp_creds_path = _tmp.name
-                sub_env["GOOGLE_CREDENTIALS_FILE"] = os.path.basename(_tmp_creds_path)
+                # Pass the full absolute path so the pipeline always finds it
+                sub_env["GOOGLE_CREDENTIALS_FILE"] = _tmp_creds_path
 
             # ── Step 1: Run Meta pipeline ──────────────────────────────────────
             fetch_box.info("⏳ Step 1/3 — Fetching data from Meta API… (this takes 1-2 min)")
@@ -983,11 +986,25 @@ with st.sidebar:
                 text=True,
                 env=sub_env,
             )
+
+            # Always show pipeline logs so failures are visible
+            pipeline_logs = (result.stdout or "")[-4000:] + "\n" + (result.stderr or "")[-2000:]
+
             if result.returncode != 0:
-                fetch_box.error("❌ Pipeline failed — data was NOT updated.")
-                with st.expander("Pipeline error output"):
-                    st.code(result.stdout[-3000:] + "\n" + result.stderr[-2000:])
+                fetch_box.error("❌ Pipeline failed — Raw Dump was NOT updated.")
+                with st.expander("Pipeline logs (check for errors)"):
+                    st.code(pipeline_logs)
                 st.stop()
+
+            # Check logs for silent upload failures even when exit code is 0
+            if "FAILED to upload" in pipeline_logs or "Skipping Google Sheets upload" in pipeline_logs:
+                fetch_box.error("❌ Pipeline ran but upload to Google Sheets failed.")
+                with st.expander("Pipeline logs"):
+                    st.code(pipeline_logs)
+                st.stop()
+
+            with st.expander("✅ Pipeline logs (success)"):
+                st.code(pipeline_logs)
 
             load_sheet.clear()
             fetch_box.info("✅ Step 1/3 done — Raw Dump updated.\n⏳ Step 2/3 — Building analytics views…")
