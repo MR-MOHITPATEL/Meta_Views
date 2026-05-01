@@ -3,6 +3,7 @@ import json
 import logging
 import datetime
 import requests
+import time
 import pandas as pd
 from typing import List, Dict, Tuple
 from dotenv import load_dotenv
@@ -40,13 +41,12 @@ def fetch_meta_insights(config: dict, start_date: str = None, end_date: str = No
             start = backfill_date
             logger.info(f"Using BACKFILL_START_DATE override: {start}")
         else:
-            # Default: 7-day rolling lookback to ensure late-arriving data is captured
-            lookback_date = datetime.date.today() - datetime.timedelta(days=7)
-            start = lookback_date.strftime("%Y-%m-%d")
+            # Default: Use the configured default start date (Feb 28)
+            start = config.get("default_start_date", "2026-02-28")
     else:
         start = start_date
         
-    end = end_date or datetime.date.today().strftime("%Y-%m-%d")
+    end = end_date or os.getenv("BACKFILL_END_DATE") or datetime.date.today().strftime("%Y-%m-%d")
     
     logger.info(f"Fetching insights for {config['ad_account_id']} from {start} to {end}")
     
@@ -71,11 +71,35 @@ def fetch_meta_insights(config: dict, start_date: str = None, end_date: str = No
     
     all_data = []
     
-    try:
-        while url:
+    while url:
+        try:
             response = requests.get(url, params=params)
-            response.raise_for_status()
             data = response.json()
+            
+            # Check for Meta API Errors
+            if 'error' in data:
+                error = data['error']
+                error_msg = error.get('message', '')
+                error_code = error.get('code')
+                error_subcode = error.get('error_subcode')
+                
+                # Check for rate limit errors (codes 4, 17, 613 or specific messages)
+                is_rate_limit = (
+                    error_code in [4, 17, 613] or 
+                    error_subcode in [1504022, 1504021] or
+                    "request limit" in error_msg.lower() or
+                    "throttled" in error_msg.lower()
+                )
+                
+                if is_rate_limit:
+                    logger.warning(f"Meta Rate Limit Reached ({error_code}/{error_subcode}). Waiting 2 minutes before retry...")
+                    time.sleep(120)
+                    continue # Retry the same request
+                else:
+                    logger.error(f"Meta API Error: {error_msg}")
+                    break # Fatal error, stop fetching
+            
+            response.raise_for_status() # Should not raise now that we check 'error' in data
             
             all_data.extend(data.get("data", []))
             
@@ -84,11 +108,12 @@ def fetch_meta_insights(config: dict, start_date: str = None, end_date: str = No
             url = paging.get("next")
             params = None
             
-        logger.info(f"Fetched {len(all_data)} insights records.")
-    except Exception as e:
-        logger.error(f"Error fetching Meta insights: {e}")
-        if 'response' in locals() and hasattr(response, 'text'):
-            logger.error(f"Response: {response.text}")
+        except Exception as e:
+            logger.error(f"Network or JSON error fetching Meta insights: {e}")
+            time.sleep(10) # Brief pause before retry
+            continue # Try again
+            
+    logger.info(f"Fetched {len(all_data)} insights records.")
     
     if not all_data:
         return pd.DataFrame(columns=["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name"])
@@ -190,8 +215,8 @@ def generate_excel_report(output_path: str, new_table: pd.DataFrame, insights: p
     if 'ad_name' in final_table.columns:
         final_table['ad_name'] = final_table['ad_name'].astype(str).str.strip()
 
-    # Define uniqueness: date, campaign_id, adset_id, ad_name
-    dedup_keys = ['date', 'campaign_id', 'adset_id', 'ad_name']
+    # Define uniqueness: date, ad_id (globally unique)
+    dedup_keys = ['date', 'ad_id']
     
     # Ensure all dedup keys exist in columns before dropping
     existing_keys = [k for k in dedup_keys if k in final_table.columns]
@@ -208,7 +233,7 @@ def generate_excel_report(output_path: str, new_table: pd.DataFrame, insights: p
         final_table["date"] = final_table["date"].dt.strftime("%Y-%m-%d")
 
     # Ensure final columns order
-    cols = ["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_name", "pincodes"]
+    cols = ["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name", "pincodes"]
     final_table = final_table[[c for c in cols if c in final_table.columns]]
 
     try:
@@ -228,7 +253,7 @@ def main():
     
     if insights_df.empty:
         logger.warning("No insights fetched. Generating empty output.")
-        generate_excel_report(config["output_excel_path"], pd.DataFrame(columns=["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "pincode"]))
+        generate_excel_report(config["output_excel_path"], pd.DataFrame(columns=["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name", "pincodes"]))
         return
         
     unique_adset_ids = insights_df["adset_id"].dropna().unique().tolist()
@@ -260,7 +285,7 @@ def main():
         final_table["date"] = final_table["date"].dt.strftime("%Y-%m-%d")
 
     # Ensure final columns order
-    cols = ["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_name", "pincodes"]
+    cols = ["date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name", "pincodes"]
     final_table = final_table[cols]
     
     # 4. Generate Output

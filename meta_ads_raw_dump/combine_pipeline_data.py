@@ -53,36 +53,92 @@ def combine_data():
     logger.info("Loading targeting data from recently generated file...")
     targeting_df = pd.read_excel(pincode_path, sheet_name="targeting_data")
 
-    # Data Normalization
-    for df_item in [perf_df, targeting_df]:
-        df_item['campaign_id'] = df_item['campaign_id'].astype(str).str.strip()
-        df_item['adset_id'] = df_item['adset_id'].astype(str).str.strip()
+    # --- Normalise all string identifier columns in both frames ---
+    for col in ['campaign_id', 'campaign_name', 'adset_id', 'adset_name', 'ad_id', 'ad_name']:
+        if col in perf_df.columns:
+            perf_df[col] = perf_df[col].astype(str).str.strip()
+        if col in targeting_df.columns:
+            targeting_df[col] = targeting_df[col].astype(str).str.strip()
 
-    # Create Join Keys
-    perf_df['join_key'] = perf_df['campaign_id'] + "_" + perf_df['adset_id']
-    targeting_df['join_key'] = targeting_df['campaign_id'] + "_" + targeting_df['adset_id']
+    # Normalise dates to plain strings (YYYY-MM-DD) in both frames
+    perf_df['date']      = pd.to_datetime(perf_df['date']).dt.strftime('%Y-%m-%d')
+    targeting_df['date'] = pd.to_datetime(targeting_df['date']).dt.strftime('%Y-%m-%d')
+
+    # --- Build a static adset -> pincodes map (most-recent mapping wins) ---
+    t_mapping = (
+        targeting_df
+        .sort_values('date', ascending=False)
+        .drop_duplicates(subset=['campaign_id', 'adset_id'])
+        [['campaign_id', 'adset_id', 'pincodes']]
+        .copy()
+    )
+
+    # --- Build a date-level ad skeleton from the targeting (pincode) data ---
+    # The pincode pipeline returns a row for every (date, ad) the account had,
+    # even on days with 0 spend - something the Insights API omits.
+    skeleton_cols = ['date', 'campaign_id', 'campaign_name', 'adset_id', 'adset_name', 'ad_id', 'ad_name']
+    skeleton_df = targeting_df[skeleton_cols].drop_duplicates().copy()
+
+    # --- Merge datasets using Ad ID + Date as the unique key ---
+    # We join on date and ad_id ONLY. Names are carried from the primary source.
+    logger.info(
+        f"Merging datasets using FULL OUTER JOIN on [date, ad_id]... "
+        f"(Performance: {len(perf_df)} rows | Skeleton: {len(skeleton_df)} rows)"
+    )
+
+    # Use only the truly unique keys for the join
+    join_keys = ['date', 'ad_id']
     
-    # Create static mapping
-    t_mapping = targeting_df.sort_values(by='date', ascending=False).drop_duplicates('join_key').copy()
-    t_mapping = t_mapping[['join_key', 'pincodes']]
+    # Prepare skeleton: only keys + name info (fallback)
+    skeleton_minimal = skeleton_df[['date', 'campaign_id', 'campaign_name', 'adset_id', 'adset_name', 'ad_id', 'ad_name']].copy()
+    
+    combined_df = skeleton_minimal.merge(perf_df, on=join_keys, how='outer', suffixes=('', '_perf'))
+    
+    # Clean up name columns if they were duplicated by the join
+    for col in ['campaign_id', 'campaign_name', 'adset_id', 'adset_name', 'ad_name']:
+        perf_col = f"{col}_perf"
+        if perf_col in combined_df.columns:
+            combined_df[col] = combined_df[perf_col].fillna(combined_df[col])
+            combined_df.drop(columns=[perf_col], inplace=True)
 
-    logger.info(f"Merging datasets using static ID-based join_key... (Base: {len(perf_df)} records)")
-    combined_df = perf_df.merge(t_mapping, on='join_key', how='left')
-
-    # Cleanup and sort
-    combined_df = combined_df.drop(columns=['join_key'])
+    # --- Attach pincode mapping (adset-level, date-independent) ---
+    combined_df = combined_df.merge(t_mapping, on=['campaign_id', 'adset_id'], how='left')
     combined_df['pincodes'] = combined_df['pincodes'].fillna("")
+
+    # --- Forward-fill image_url per ad so inactive days still show the creative ---
+    if 'image_url' in combined_df.columns:
+        combined_df['date'] = pd.to_datetime(combined_df['date'])
+        combined_df = combined_df.sort_values(['ad_id', 'date'])
+        combined_df['image_url'] = (
+            combined_df.groupby('ad_id')['image_url']
+            .transform(lambda s: s.ffill().bfill())
+        )
+        combined_df['date'] = combined_df['date'].dt.strftime('%Y-%m-%d')
+
+    # --- Fill numeric metric columns with 0 for inactive days ---
+    numeric_metric_cols = [
+        'spend', 'impressions', 'cpm', 'cpc', 'ctr',
+        'link_clicks', 'landing_page_views', 'c2v_ratio',
+        'cost_per_result', 'roas', 'cvr',
+        'add_to_cart', 'leads', 'purchases', 'revenue'
+    ]
+    for col in numeric_metric_cols:
+        if col in combined_df.columns:
+            combined_df[col] = combined_df[col].fillna(0)
+
+    # --- Deduplicate and sort ---
     combined_df['date'] = pd.to_datetime(combined_df['date'])
     combined_df = combined_df.sort_values(by='date', ascending=False)
     combined_df['date'] = combined_df['date'].dt.strftime('%Y-%m-%d')
     combined_df = combined_df.drop_duplicates()
 
-    # Enforce canonical column order (same as RAW_DUMP_COLS) so pivot tables
-    # in Google Sheets never get field references remapped to the wrong column.
+    logger.info(f"Final combined dataset: {len(combined_df)} rows across {combined_df['date'].nunique()} unique dates.")
+
+    # Enforce canonical column order (same as RAW_DUMP_COLS)
     for col in RAW_DUMP_COLS:
         if col not in combined_df.columns:
             combined_df[col] = ""
-    combined_df = combined_df[RAW_DUMP_COLS]
+    combined_df = combined_df[[c for c in RAW_DUMP_COLS if c in combined_df.columns]]
 
     logger.info(f"Exporting final master report to {output_path}...")
     try:
@@ -120,7 +176,7 @@ _CHUNK_ROWS = 2000  # safe batch size for Sheets API
 # Canonical column order — Raw Dump must ALWAYS have columns in this exact order
 # so that Google Sheets native pivot tables never remap fields to the wrong column.
 RAW_DUMP_COLS = [
-    "date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_name",
+    "date", "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name",
     "image_url", "pincodes",
     "spend", "impressions", "cpm", "cpc", "ctr", "link_clicks", "landing_page_views",
     "c2v_ratio", "cost_per_result", "roas", "cvr", "add_to_cart", "leads", "purchases", "revenue",
@@ -129,10 +185,10 @@ RAW_DUMP_COLS = [
 # Dedup by text fields only — IDs (campaign_id, adset_id) are integers and
 # lose precision when Google Sheets stores them as floats (1202445745086 → 1200000000000).
 # Text fields (campaign_name, adset_name, ad_name) are immune to this problem.
-_DEDUP_KEYS = ["date", "campaign_name", "adset_name", "ad_name"]
+_DEDUP_KEYS = ["date", "ad_id"]
 
 # ID columns that must be stored as plain text strings in Google Sheets
-_ID_COLS = ["campaign_id", "adset_id"]
+_ID_COLS = ["campaign_id", "adset_id", "ad_id"]
 
 
 def _normalize_id(val) -> str:
@@ -319,6 +375,12 @@ def upload_to_google_sheets(df: pd.DataFrame):
         # 5. Clear and rewrite (pivot tables survive because column order is fixed)
         worksheet.clear()
         time.sleep(0.5)
+
+        # Resize sheet if necessary to accommodate new rows
+        if worksheet.row_count < len(all_values):
+            logger.info(f"Resizing worksheet to {len(all_values)} rows...")
+            worksheet.resize(rows=len(all_values))
+            time.sleep(1)
 
         for chunk_start in range(0, len(all_values), _CHUNK_ROWS):
             chunk = all_values[chunk_start : chunk_start + _CHUNK_ROWS]
